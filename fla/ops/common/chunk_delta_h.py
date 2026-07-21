@@ -5,6 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+import threading
+from pathlib import Path
+
 import torch
 import triton
 import triton.language as tl
@@ -26,6 +30,43 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 # Keep this kernel on num_warps=2 for Blackwell until Triton 3.8 is released
 # and we re-validate the wider config space.
 GATED_DELTA_RULE_FWD_H_NUM_WARPS = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
+
+_GDN_DUMP_LOCK = threading.Lock()
+_GDN_DUMP_COUNTS = {
+    'fwd_h': 0,
+    'bwd_dhu': 0,
+}
+
+
+def _dump_gdn_kernel_io(op: str, inputs: dict, outputs: dict) -> None:
+    dump_dir = os.environ.get('FLA_GDN_DUMP_DIR')
+    if not dump_dir:
+        return
+
+    max_dumps = int(os.environ.get('FLA_GDN_DUMP_MAX', '1'))
+    with _GDN_DUMP_LOCK:
+        dump_id = _GDN_DUMP_COUNTS[op]
+        if dump_id >= max_dumps:
+            return
+        _GDN_DUMP_COUNTS[op] += 1
+
+    def to_cpu(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().clone()
+        return value
+
+    payload = {
+        'format_version': 1,
+        'op': op,
+        'layout': 'BTHD',
+        'gate_exponent_base': 2,
+        'inputs': {name: to_cpu(value) for name, value in inputs.items()},
+        'outputs': {name: to_cpu(value) for name, value in outputs.items()},
+    }
+    rank = os.environ.get('RANK', os.environ.get('LOCAL_RANK', '0'))
+    path = Path(dump_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path / f'{op}_rank{rank}_pid{os.getpid()}_{dump_id:04d}.pt')
 
 
 @triton.heuristics({
@@ -661,6 +702,32 @@ def chunk_gated_delta_rule_fwd_h(
         BT=BT,
         STATE_V_FIRST=state_v_first,
     )
+    _dump_gdn_kernel_io(
+        'fwd_h',
+        inputs={
+            'k': k,
+            'v': u,
+            'w': w,
+            'g': g,
+            'gk': gk,
+            'h0': initial_state,
+            'cu_seqlens': cu_seqlens,
+            'chunk_indices': chunk_indices,
+            'chunk_offsets': chunk_offsets,
+            'T': T,
+            'H': H,
+            'HV': HV,
+            'K': K,
+            'V': V,
+            'BT': BT,
+            'state_v_first': state_v_first,
+        },
+        outputs={
+            'h': h,
+            'v_new': v_new,
+            'ht': final_state,
+        },
+    )
     return h, v_new, final_state
 
 
@@ -723,5 +790,35 @@ def chunk_gated_delta_rule_bwd_dhu(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
+    )
+    _dump_gdn_kernel_io(
+        'bwd_dhu',
+        inputs={
+            'q': q,
+            'k': k,
+            'w': w,
+            'g': g,
+            'gk': gk,
+            'dht': dht,
+            'do': do,
+            'dv': dv,
+            'h0': h0,
+            'cu_seqlens': cu_seqlens,
+            'chunk_indices': chunk_indices,
+            'chunk_offsets': chunk_offsets,
+            'scale': scale,
+            'T': T,
+            'H': H,
+            'HV': HV,
+            'K': K,
+            'V': V,
+            'BT': BT,
+            'state_v_first': state_v_first,
+        },
+        outputs={
+            'dh': dh,
+            'dh0': dh0,
+            'dv2': dv2,
+        },
     )
     return dh, dh0, dv2
