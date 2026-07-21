@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 
@@ -27,6 +28,9 @@ def main() -> None:
     if args.head_dim != 128:
         raise ValueError('The Ascend C fwd_h comparison currently requires head-dim=128.')
 
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    args.dump_dir = args.dump_dir.expanduser().resolve()
     os.environ['FLA_DISABLE_BACKEND_DISPATCH'] = '1'
     os.environ['FLA_GDN_DUMP_DIR'] = str(args.dump_dir)
     os.environ['FLA_GDN_DUMP_MAX'] = '1'
@@ -80,7 +84,17 @@ def main() -> None:
         scale=D ** -0.5,
         chunk_size=args.chunk_size,
     )
-    print(f'Dumps written to {args.dump_dir}')
+    dump_files = sorted(args.dump_dir.glob('*.pt'))
+    expected_ops = {'fwd_h', 'bwd_dhu'}
+    dumped_ops = {path.name.split('_rank', 1)[0] for path in dump_files}
+    if not expected_ops.issubset(dumped_ops):
+        raise RuntimeError(
+            f'Expected fwd_h and bwd_dhu dumps in {args.dump_dir}, but found: '
+            f'{[path.name for path in dump_files]}. Imported FLA from {repo_root}.'
+        )
+    print('Dump files:')
+    for path in dump_files:
+        print(path)
 
 
 if __name__ == '__main__':
