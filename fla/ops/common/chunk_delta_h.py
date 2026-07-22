@@ -60,6 +60,8 @@ def _dump_gdn_kernel_io(op: str, inputs: dict, outputs: dict) -> None:
         'op': op,
         'layout': 'BTHD',
         'gate_exponent_base': 2,
+        'case_name': os.environ.get('FLA_GDN_CASE_NAME'),
+        'case_description': os.environ.get('FLA_GDN_CASE_DESCRIPTION'),
         'inputs': {name: to_cpu(value) for name, value in inputs.items()},
         'outputs': {name: to_cpu(value) for name, value in outputs.items()},
     }
